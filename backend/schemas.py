@@ -4,17 +4,18 @@ from datetime import datetime
 
 class ContactCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="Full name of sender", examples=["Kanvesh Raut"])
-    email: EmailStr = Field(..., description="Valid sender email address", examples=["kanveshraut9640@gmail.com"])
+    email: EmailStr = Field(..., max_length=255, description="Valid sender email address", examples=["visitor@example.com"])
     phone: Optional[str] = Field(None, max_length=50, description="Optional phone number", examples=["+91 9075919023"])
-    subject: str = Field(..., min_length=2, max_length=200, description="Subject of the message", examples=["Internship Opportunity"])
-    message: str = Field(..., min_length=10, max_length=5000, description="Detailed message body", examples=["Hello Kanvesh, I reviewed your portfolio..."])
+    subject: Optional[str] = Field(None, max_length=200, description="Optional subject of the message", examples=["Project Inquiry"])
+    message: str = Field(..., min_length=10, max_length=5000, description="Detailed message body", examples=["Hello Kanvesh, I would like to contact you."])
+    website: Optional[str] = Field(None, description="Honeypot field for spam prevention. Must be empty for legitimate submissions.")
 
 class ContactResponse(BaseModel):
     id: int
     name: str
     email: str
     phone: Optional[str] = None
-    subject: str
+    subject: Optional[str] = None
     message: str
     created_at: datetime
     status: str
@@ -24,7 +25,7 @@ class ContactResponse(BaseModel):
 class ContactSubmissionResult(BaseModel):
     success: bool
     message: str
-    contact_id: int
+    contact_id: Optional[int] = None
     timestamp: datetime
 
 class HealthResponse(BaseModel):

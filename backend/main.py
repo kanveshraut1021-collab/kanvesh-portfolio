@@ -42,12 +42,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure CORS Middleware
+# Configure CORS Middleware using dynamic, trusted origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -57,15 +57,16 @@ app.add_middleware(
 @app.get("/api/health", response_model=HealthResponse, tags=["System"])
 def check_health(db: Session = Depends(get_db)):
     """
-    Check the health of the FastAPI service and verify database connectivity.
+    Check the health of the FastAPI service and verify PostgreSQL / Supabase database connectivity.
     """
     db_connected = False
     try:
-        # Simple test query
-        db.execute(text("SELECT 1") if False else desc("1")) # safe check
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
         db_connected = True
-    except Exception:
-        db_connected = True  # session opened successfully
+    except Exception as e:
+        logger.warning("Database connectivity check failed: %s", str(e))
+        db_connected = False
 
     return HealthResponse(
         status="healthy",
@@ -87,14 +88,25 @@ def check_health(db: Session = Depends(get_db)):
 def create_contact_message(payload: ContactCreate, db: Session = Depends(get_db)):
     """
     Receive contact message submission from frontend portfolio,
-    validate payload via Pydantic, and persist into PostgreSQL via SQLAlchemy.
+    validate payload via Pydantic, and persist into PostgreSQL (Supabase) via SQLAlchemy.
     """
+    # 1. Anti-spam honeypot detection
+    if payload.website:
+        logger.warning("Honeypot triggered by suspected bot. Discarding submission.")
+        return ContactSubmissionResult(
+            success=True,
+            message="Your message has been saved successfully!",
+            contact_id=None,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+    # 2. Persist to PostgreSQL database
     try:
         new_message = ContactMessage(
             name=payload.name.strip(),
             email=payload.email.strip().lower(),
             phone=payload.phone.strip() if payload.phone else None,
-            subject=payload.subject.strip(),
+            subject=payload.subject.strip() if payload.subject else None,
             message=payload.message.strip(),
             status="unread"
         )
@@ -103,7 +115,7 @@ def create_contact_message(payload: ContactCreate, db: Session = Depends(get_db)
         db.refresh(new_message)
 
         logger.info(
-            "New contact form submission: #%s from %s <%s>",
+            "Contact message stored: ID #%s from %s <%s>",
             new_message.id,
             new_message.name,
             new_message.email
@@ -111,39 +123,16 @@ def create_contact_message(payload: ContactCreate, db: Session = Depends(get_db)
 
         return ContactSubmissionResult(
             success=True,
-            message="Thank you! Your message has been received successfully and stored.",
+            message="Your message has been saved successfully!",
             contact_id=new_message.id,
             timestamp=new_message.created_at
         )
     except Exception as e:
         db.rollback()
-        logger.error("Error saving contact message: %s", str(e))
+        logger.error("Database error while storing contact message: %s", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while saving your message to the database. Please try again."
-        )
-
-@app.get(
-    "/api/contact",
-    response_model=List[ContactResponse],
-    tags=["Contact"]
-)
-def list_contact_messages(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100),
-    db: Session = Depends(get_db)
-):
-    """
-    List all submitted contact messages stored in PostgreSQL.
-    """
-    try:
-        messages = db.query(ContactMessage).order_by(desc(ContactMessage.created_at)).offset(skip).limit(limit).all()
-        return messages
-    except Exception as e:
-        logger.error("Error retrieving contact messages: %s", str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve messages from database."
+            detail="Failed to save message to database. Please try again or reach out directly."
         )
 
 # -----------------------------------------------------------------------------

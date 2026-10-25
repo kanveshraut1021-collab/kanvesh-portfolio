@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Mail, Phone, MapPin, GraduationCap, Send, CheckCircle2, AlertCircle, Loader2, Sparkles, Database } from 'lucide-react';
-import { LinkedinIcon, GithubIcon } from './SocialIcons';
+import { LinkedinIcon, GithubIcon, WhatsAppIcon } from './SocialIcons';
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const WHATSAPP_NUMBER = (import.meta.env.VITE_WHATSAPP_NUMBER || '919075919023').replace(/[^0-9]/g, '');
 
 export default function Contact() {
   const [formData, setFormData] = useState({
@@ -8,18 +11,23 @@ export default function Contact() {
     email: '',
     phone: '',
     subject: '',
-    message: ''
+    message: '',
+    website: '' // Anti-spam honeypot
   });
 
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState(null);
+  const [submittedData, setSubmittedData] = useState(null);
   const [backendHealth, setBackendHealth] = useState(null);
 
   // Check FastAPI backend health on mount
   useEffect(() => {
-    fetch('/api/health')
-      .then(res => res.json())
+    fetch(`${API_BASE_URL}/api/health`)
+      .then(res => {
+        if (!res.ok) throw new Error('Offline');
+        return res.json();
+      })
       .then(data => setBackendHealth(data))
       .catch(() => setBackendHealth({ status: 'offline', database_engine: 'local' }));
   }, []);
@@ -32,9 +40,6 @@ export default function Contact() {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!formData.email.trim() || !emailRegex.test(formData.email.trim())) {
       errs.email = 'Please provide a valid email address';
-    }
-    if (!formData.subject.trim() || formData.subject.trim().length < 2) {
-      errs.subject = 'Please enter a subject topic';
     }
     if (!formData.message.trim() || formData.message.trim().length < 10) {
       errs.message = 'Please enter a message of at least 10 characters';
@@ -51,6 +56,22 @@ export default function Contact() {
     }
   };
 
+  const generateWhatsAppMessage = (data) => {
+    const name = data.name?.trim() || '';
+    const email = data.email?.trim() || '';
+    const subject = data.subject?.trim() || 'Project Inquiry';
+    const message = data.message?.trim() || '';
+
+    return `Hello Kanvesh!\nMy name is ${name}.\nEmail: ${email}\nSubject: ${subject}\nMessage: ${message}\n\nI would like to contact you regarding this inquiry.`;
+  };
+
+  const openWhatsAppChat = (data) => {
+    const text = generateWhatsAppMessage(data);
+    const url = `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(text)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  // Option 1: Send Message (Saves to PostgreSQL database via FastAPI)
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validate()) return;
@@ -58,41 +79,66 @@ export default function Contact() {
     setSubmitting(true);
     setSubmitResult(null);
 
+    const payload = {
+      name: formData.name.trim(),
+      email: formData.email.trim(),
+      phone: formData.phone.trim() || null,
+      subject: formData.subject.trim() || null,
+      message: formData.message.trim(),
+      website: formData.website || null
+    };
+
     try {
-      const response = await fetch('/api/contact', {
+      const response = await fetch(`${API_BASE_URL}/api/contact`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
-        body: JSON.stringify({
-          name: formData.name.trim(),
-          email: formData.email.trim(),
-          phone: formData.phone.trim() || null,
-          subject: formData.subject.trim(),
-          message: formData.message.trim()
-        })
+        body: JSON.stringify(payload)
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || 'Failed to submit form to backend');
+      const rawText = await response.text();
+      let data = null;
+      if (rawText && rawText.trim().length > 0) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = null;
+        }
       }
 
+      if (!response.ok) {
+        let errorMsg = data?.detail;
+        if (!errorMsg) {
+          if (response.status === 502 || response.status === 503 || response.status === 504) {
+            errorMsg = 'FastAPI backend server is not reachable. Please ensure the backend is running on http://127.0.0.1:8000 (uvicorn backend.main:app --port 8000).';
+          } else {
+            errorMsg = `Server response error (${response.status}${response.statusText ? ` ${response.statusText}` : ''}). Please check backend server.`;
+          }
+        }
+        throw new Error(errorMsg);
+      }
+
+      if (!data) {
+        throw new Error('Backend returned an empty response. Please verify FastAPI backend status.');
+      }
+
+      setSubmittedData({ ...payload });
       setSubmitResult({
         success: true,
-        message: data.message || 'Your message has been successfully stored in our database!',
+        message: data.message || 'Your message has been saved successfully!',
         contactId: data.contact_id
       });
 
-      // Reset form
+      // Clear the form fields after successful persistence
       setFormData({
         name: '',
         email: '',
         phone: '',
         subject: '',
-        message: ''
+        message: '',
+        website: ''
       });
     } catch (err) {
       console.error('Contact submission error:', err);
@@ -103,6 +149,36 @@ export default function Contact() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  // Option 2: Contact Me on WhatsApp (Direct click-to-chat without database persistence)
+  const handleDirectWhatsApp = (e) => {
+    e.preventDefault();
+
+    const errs = {};
+    if (!formData.name.trim() || formData.name.trim().length < 2) {
+      errs.name = 'Please enter your name before opening WhatsApp';
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!formData.email.trim() || !emailRegex.test(formData.email.trim())) {
+      errs.email = 'Please provide a valid email address';
+    }
+    if (!formData.message.trim() || formData.message.trim().length < 5) {
+      errs.message = 'Please enter your message before opening WhatsApp';
+    }
+
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
+      return;
+    }
+
+    openWhatsAppChat(formData);
+  };
+
+  const handleResetForm = () => {
+    setSubmitResult(null);
+    setSubmittedData(null);
+    setErrors({});
   };
 
   return (
@@ -147,7 +223,7 @@ export default function Contact() {
                 </div>
               </div>
 
-              {/* Phone */}
+              {/* Phone / WhatsApp */}
               <div className="bg-[#FAF6F1] p-4 rounded-xl border border-[#A67C64]/20 flex items-center gap-4 hover:border-[#882B34] transition-colors">
                 <div className="w-10 h-10 rounded-lg bg-[#EAE0D6] text-[#705044] flex items-center justify-center shrink-0">
                   <Phone className="w-5 h-5" />
@@ -157,7 +233,9 @@ export default function Contact() {
                     Direct Phone / WhatsApp
                   </span>
                   <a
-                    href="tel:+919075919023"
+                    href={`https://wa.me/${WHATSAPP_NUMBER}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     className="text-sm font-semibold text-[#352923] hover:text-[#882B34]"
                   >
                     +91 9075919023
@@ -241,195 +319,267 @@ export default function Contact() {
 
           </div>
 
-          {/* Right Column: Interactive Form */}
+          {/* Right Column: Interactive Form & WhatsApp Options */}
           <div className="lg:col-span-7">
-            <div className="bg-[#FAF6F1] border-2 border-[#A67C64]/25 rounded-2xl p-6 sm:p-8 shadow-xl relative">
-              
-              <div className="pb-4 mb-6 border-b border-[#A67C64]/20 flex items-center justify-between">
-                <div>
-                  <h3 className="font-serif text-2xl font-bold text-[#352923]">
-                    Send a Message
+            {submitResult && submitResult.success ? (
+              /* Success View */
+              <div className="bg-[#FAF6F1] border-2 border-[#A67C64]/25 rounded-2xl p-6 sm:p-8 shadow-xl relative animate-in fade-in duration-300">
+                <div className="text-center py-4">
+                  <div className="w-16 h-16 rounded-2xl bg-[#EAF7EE] text-[#1B612C] flex items-center justify-center mx-auto mb-4 border border-[#4BB543]/30 shadow-xs">
+                    <CheckCircle2 className="w-9 h-9 text-[#2E7D32]" />
+                  </div>
+                  
+                  <span className="font-mono text-xs uppercase tracking-widest text-[#2E7D32] font-semibold block mb-1">
+                    Database Record Created
+                  </span>
+                  <h3 className="font-serif text-2xl sm:text-3xl font-bold text-[#352923] mb-2">
+                    Your message has been saved successfully!
                   </h3>
-                  <p className="text-xs text-[#78685D] mt-0.5">
-                    Messages are validated via Pydantic and persisted directly to PostgreSQL.
-                  </p>
-                </div>
-                <div className="w-8 h-8 rounded-lg bg-[#882B34] text-[#F5EEE7] flex items-center justify-center font-serif text-xs font-bold">
-                  KR
-                </div>
-              </div>
-
-              {/* Feedback Alert if submitted */}
-              {submitResult && (
-                <div
-                  className={`p-4 rounded-xl mb-6 flex items-start gap-3 border ${
-                    submitResult.success
-                      ? 'bg-[#EAF7EE] border-[#4BB543]/40 text-[#1B612C]'
-                      : 'bg-[#FDF2F2] border-[#E05252]/40 text-[#9B2C2C]'
-                  }`}
-                >
-                  {submitResult.success ? (
-                    <CheckCircle2 className="w-5 h-5 text-[#4BB543] shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertCircle className="w-5 h-5 text-[#E05252] shrink-0 mt-0.5" />
-                  )}
-                  <div className="text-xs sm:text-sm">
-                    <strong className="block font-semibold">
-                      {submitResult.success ? 'Message Delivered!' : 'Submission Notice'}
-                    </strong>
-                    <span>{submitResult.message}</span>
+                  <p className="text-sm text-[#78685D] max-w-md mx-auto mb-6">
+                    Thank you for reaching out, <strong className="text-[#352923]">{submittedData?.name || 'there'}</strong>. Your inquiry has been stored securely in PostgreSQL.
                     {submitResult.contactId && (
-                      <span className="block font-mono text-[11px] text-[#78685D] mt-1">
-                        Database Message Reference ID: #{submitResult.contactId}
+                      <span className="block font-mono text-xs text-[#9B4B52] mt-1 font-semibold">
+                        Database Message ID: #{submitResult.contactId}
                       </span>
                     )}
-                  </div>
-                </div>
-              )}
+                  </p>
 
-              <form onSubmit={handleSubmit} noValidate className="space-y-4">
+                  {/* Section: Would you like to contact me on WhatsApp too? */}
+                  <div className="p-5 rounded-xl bg-[#FFFFFF] border border-[#A67C64]/25 max-w-lg mx-auto text-left shadow-xs mb-6">
+                    <div className="flex items-center gap-2 mb-2">
+                      <WhatsAppIcon className="w-5 h-5 text-[#25D366]" />
+                      <h4 className="font-serif text-base font-bold text-[#352923]">
+                        Would you like to contact me on WhatsApp too?
+                      </h4>
+                    </div>
+                    <p className="text-xs text-[#78685D] mb-4 leading-relaxed">
+                      Prefer real-time chat? Click below to open WhatsApp with your message already pre-filled. You can review it before sending.
+                    </p>
+                    
+                    <button
+                      type="button"
+                      onClick={() => openWhatsAppChat(submittedData)}
+                      className="w-full inline-flex items-center justify-center gap-2.5 px-5 py-3 rounded-xl bg-[#25D366] hover:bg-[#1EBE5D] text-[#FFFFFF] text-sm font-semibold transition-all duration-200 shadow-sm hover:shadow-md cursor-pointer"
+                    >
+                      <WhatsAppIcon className="w-4 h-4 text-[#FFFFFF]" />
+                      <span>Contact Me on WhatsApp</span>
+                    </button>
+                  </div>
+
+                  {/* Reset Form Option */}
+                  <button
+                    type="button"
+                    onClick={handleResetForm}
+                    className="inline-flex items-center gap-1.5 text-xs font-mono text-[#78685D] hover:text-[#9B4B52] underline underline-offset-4 transition-colors cursor-pointer"
+                  >
+                    <span>&larr; Send another message</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Idle / Editing / Error View */
+              <div className="bg-[#FAF6F1] border-2 border-[#A67C64]/25 rounded-2xl p-6 sm:p-8 shadow-xl relative">
                 
-                {/* Name & Email Row */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="pb-4 mb-6 border-b border-[#A67C64]/20 flex items-center justify-between">
                   <div>
-                    <label htmlFor="name" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
-                      Your Name <span className="text-[#882B34]">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      id="name"
-                      name="name"
-                      value={formData.name}
-                      onChange={handleChange}
-                      placeholder="e.g. Alex Morgan"
-                      disabled={submitting}
-                      className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all ${
-                        errors.name
-                          ? 'border-[#E05252] focus:ring-[#E05252]/30'
-                          : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
-                      }`}
-                    />
-                    {errors.name && (
-                      <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.name}</p>
-                    )}
+                    <h3 className="font-serif text-2xl font-bold text-[#352923]">
+                      Send a Message
+                    </h3>
+                    <p className="text-xs text-[#78685D] mt-0.5">
+                      Choose between saving to PostgreSQL database or connecting directly via WhatsApp.
+                    </p>
                   </div>
-
-                  <div>
-                    <label htmlFor="email" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
-                      Email Address <span className="text-[#882B34]">*</span>
-                    </label>
-                    <input
-                      type="email"
-                      id="email"
-                      name="email"
-                      value={formData.email}
-                      onChange={handleChange}
-                      placeholder="e.g. alex@company.com"
-                      disabled={submitting}
-                      className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all ${
-                        errors.email
-                          ? 'border-[#E05252] focus:ring-[#E05252]/30'
-                          : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
-                      }`}
-                    />
-                    {errors.email && (
-                      <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.email}</p>
-                    )}
+                  <div className="w-8 h-8 rounded-lg bg-[#882B34] text-[#F5EEE7] flex items-center justify-center font-serif text-xs font-bold">
+                    KR
                   </div>
                 </div>
 
-                {/* Phone & Subject Row */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label htmlFor="phone" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
-                      Phone Number <span className="text-[#9F8F84] font-normal">(Optional)</span>
-                    </label>
-                    <input
-                      type="tel"
-                      id="phone"
-                      name="phone"
-                      value={formData.phone}
-                      onChange={handleChange}
-                      placeholder="e.g. +91 9876543210"
-                      disabled={submitting}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border border-[#A67C64]/30 text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:border-[#882B34] focus:ring-2 focus:ring-[#882B34]/20 transition-all"
-                    />
+                {/* Error Banner */}
+                {submitResult && !submitResult.success && (
+                  <div className="p-4 rounded-xl mb-6 flex items-start gap-3 border bg-[#FDF2F2] border-[#E05252]/40 text-[#9B2C2C]">
+                    <AlertCircle className="w-5 h-5 text-[#E05252] shrink-0 mt-0.5" />
+                    <div className="text-xs sm:text-sm">
+                      <strong className="block font-semibold">
+                        Submission Error
+                      </strong>
+                      <span>{submitResult.message}</span>
+                    </div>
                   </div>
+                )}
 
-                  <div>
-                    <label htmlFor="subject" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
-                      Subject <span className="text-[#882B34]">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      id="subject"
-                      name="subject"
-                      value={formData.subject}
-                      onChange={handleChange}
-                      placeholder="e.g. Internship Inquiry / Web Project"
-                      disabled={submitting}
-                      className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all ${
-                        errors.subject
-                          ? 'border-[#E05252] focus:ring-[#E05252]/30'
-                          : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
-                      }`}
-                    />
-                    {errors.subject && (
-                      <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.subject}</p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Message Body */}
-                <div>
-                  <label htmlFor="message" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
-                    Your Message <span className="text-[#882B34]">*</span>
-                  </label>
-                  <textarea
-                    id="message"
-                    name="message"
-                    rows="4"
-                    value={formData.message}
+                <form onSubmit={handleSubmit} noValidate className="space-y-4">
+                  
+                  {/* Honeypot field (hidden from genuine users) */}
+                  <input
+                    type="text"
+                    name="website"
+                    value={formData.website}
                     onChange={handleChange}
-                    placeholder="Hello Kanvesh, I saw your portfolio and project showcase and would love to connect regarding..."
-                    disabled={submitting}
-                    className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all resize-y ${
-                      errors.message
-                        ? 'border-[#E05252] focus:ring-[#E05252]/30'
-                        : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
-                    }`}
+                    tabIndex={-1}
+                    autoComplete="off"
+                    style={{ display: 'none' }}
+                    aria-hidden="true"
                   />
-                  {errors.message && (
-                    <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.message}</p>
-                  )}
-                </div>
 
-                {/* Submit Button */}
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-[#9B4B52] hover:bg-[#705044] text-[#F5EEE7] text-sm font-semibold transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
-                >
-                  {submitting ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Writing to Database...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Send Message to Kanvesh</span>
-                      <Send className="w-4 h-4" />
-                    </>
-                  )}
-                </button>
+                  {/* Name & Email Row */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label htmlFor="name" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
+                        Your Name <span className="text-[#882B34]">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        id="name"
+                        name="name"
+                        value={formData.name}
+                        onChange={handleChange}
+                        placeholder="e.g. Alex Morgan"
+                        disabled={submitting}
+                        className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all ${
+                          errors.name
+                            ? 'border-[#E05252] focus:ring-[#E05252]/30'
+                            : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
+                        }`}
+                      />
+                      {errors.name && (
+                        <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.name}</p>
+                      )}
+                    </div>
 
-                <p className="text-[11px] text-center text-[#78685D] font-mono mt-2">
-                  Protected with Pydantic validation &amp; SQLAlchemy PostgreSQL storage.
-                </p>
+                    <div>
+                      <label htmlFor="email" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
+                        Email Address <span className="text-[#882B34]">*</span>
+                      </label>
+                      <input
+                        type="email"
+                        id="email"
+                        name="email"
+                        value={formData.email}
+                        onChange={handleChange}
+                        placeholder="e.g. alex@company.com"
+                        disabled={submitting}
+                        className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all ${
+                          errors.email
+                            ? 'border-[#E05252] focus:ring-[#E05252]/30'
+                            : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
+                        }`}
+                      />
+                      {errors.email && (
+                        <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.email}</p>
+                      )}
+                    </div>
+                  </div>
 
-              </form>
+                  {/* Phone & Subject Row */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label htmlFor="phone" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
+                        Phone Number <span className="text-[#9F8F84] font-normal">(Optional)</span>
+                      </label>
+                      <input
+                        type="tel"
+                        id="phone"
+                        name="phone"
+                        value={formData.phone}
+                        onChange={handleChange}
+                        placeholder="e.g. +91 9876543210"
+                        disabled={submitting}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border border-[#A67C64]/30 text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:border-[#882B34] focus:ring-2 focus:ring-[#882B34]/20 transition-all"
+                      />
+                    </div>
 
-            </div>
+                    <div>
+                      <label htmlFor="subject" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
+                        Subject <span className="text-[#9F8F84] font-normal">(Optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        id="subject"
+                        name="subject"
+                        value={formData.subject}
+                        onChange={handleChange}
+                        placeholder="e.g. Project Inquiry / Collaboration"
+                        disabled={submitting}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border border-[#A67C64]/30 text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:border-[#882B34] focus:ring-2 focus:ring-[#882B34]/20 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Message Body */}
+                  <div>
+                    <label htmlFor="message" className="block text-xs font-mono font-semibold text-[#705044] mb-1">
+                      Your Message <span className="text-[#882B34]">*</span>
+                    </label>
+                    <textarea
+                      id="message"
+                      name="message"
+                      rows="4"
+                      value={formData.message}
+                      onChange={handleChange}
+                      placeholder="Hello Kanvesh, I saw your portfolio and project showcase and would love to connect regarding..."
+                      disabled={submitting}
+                      className={`w-full px-3.5 py-2.5 rounded-xl bg-[#FFFFFF] border text-sm text-[#352923] placeholder-[#9F8F84] focus:outline-none focus:ring-2 transition-all resize-y ${
+                        errors.message
+                          ? 'border-[#E05252] focus:ring-[#E05252]/30'
+                          : 'border-[#A67C64]/30 focus:border-[#882B34] focus:ring-[#882B34]/20'
+                      }`}
+                    />
+                    {errors.message && (
+                      <p className="text-[11px] text-[#E05252] mt-1 font-mono">{errors.message}</p>
+                    )}
+                  </div>
+
+                  {/* Two Contact Options */}
+                  <div className="pt-2 space-y-3">
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      
+                      {/* Option 1: Send Message (PostgreSQL) */}
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className="flex-1 inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-[#9B4B52] hover:bg-[#705044] text-[#F5EEE7] text-sm font-semibold transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {submitting ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Saving to Database...</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>Send Message</span>
+                            <Send className="w-4 h-4" />
+                          </>
+                        )}
+                      </button>
+
+                      {/* Option 2: Contact Me on WhatsApp (Direct) */}
+                      <button
+                        type="button"
+                        onClick={handleDirectWhatsApp}
+                        disabled={submitting}
+                        className="inline-flex items-center justify-center gap-2.5 px-5 py-3.5 rounded-xl bg-[#FFFFFF] hover:bg-[#F2FAF4] border-2 border-[#25D366]/40 hover:border-[#25D366] text-[#1E7E34] hover:text-[#155724] text-sm font-semibold transition-all duration-200 shadow-2xs hover:shadow-xs cursor-pointer"
+                      >
+                        <WhatsAppIcon className="w-4 h-4 text-[#25D366]" />
+                        <span>Contact Me on WhatsApp</span>
+                      </button>
+
+                    </div>
+
+                    {/* Explanatory notes */}
+                    <div className="flex flex-col sm:flex-row items-center justify-between text-[11px] text-[#78685D] font-mono gap-1 pt-1">
+                      <span>• Send Message saves to PostgreSQL database.</span>
+                      <span>• WhatsApp opens chat directly without saving to database.</span>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-center text-[#78685D] font-mono mt-3">
+                    Validated with Pydantic &amp; stored securely in PostgreSQL via SQLAlchemy.
+                  </p>
+
+                </form>
+
+              </div>
+            )}
           </div>
 
         </div>
@@ -438,3 +588,4 @@ export default function Contact() {
     </section>
   );
 }
+

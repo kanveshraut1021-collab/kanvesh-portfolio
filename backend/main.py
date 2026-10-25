@@ -1,207 +1,378 @@
+
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
-from fastapi import FastAPI, Depends, HTTPException, status, Query
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import text
 
 from backend.config import settings
-from backend.database import get_db, init_db, ACTIVE_ENGINE_TYPE, engine
+from backend.database import (
+    get_db,
+    init_db,
+    ACTIVE_ENGINE_TYPE,
+)
 from backend.models import ContactMessage
 from backend.schemas import (
     ContactCreate,
-    ContactResponse,
     ContactSubmissionResult,
     HealthResponse,
-    ProjectInfo
+    ProjectInfo,
 )
 
-logger = logging.getLogger("portfolio.api")
+
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
+
 logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger("portfolio.api")
+
+
+# --------------------------------------------------
+# DATABASE STARTUP
+# --------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize DB schema
-    logger.info("Starting up FastAPI application...")
+    logger.info("Starting FastAPI application...")
+
     try:
         init_db()
         logger.info("Database tables verified.")
+
     except Exception as e:
-        logger.error("Failed to initialize database: %s", e)
+        logger.exception("Database initialization failed: %s", e)
+
     yield
-    # Shutdown
+
     logger.info("Shutting down FastAPI application...")
+
+
+# --------------------------------------------------
+# FASTAPI APPLICATION
+# --------------------------------------------------
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.PROJECT_VERSION,
-    description="Python FastAPI backend for Kanvesh Raut's Full-Stack Portfolio with PostgreSQL/SQLAlchemy storage and contact management.",
-    lifespan=lifespan
+    description="FastAPI backend for Kanvesh Raut's portfolio.",
+    lifespan=lifespan,
 )
 
-# Configure CORS Middleware using dynamic, trusted origins
+
+# --------------------------------------------------
+# CORS CONFIGURATION
+# --------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+
+    allow_origins=[
+        "https://kanvesh-portfolio.vercel.app",
+    ],
+
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+
+    allow_methods=[
+        "GET",
+        "POST",
+        "OPTIONS",
+    ],
+
+    allow_headers=[
+        "Content-Type",
+        "Accept",
+        "Authorization",
+    ],
 )
 
-# -----------------------------------------------------------------------------
+
+# --------------------------------------------------
 # HEALTH CHECK
-# -----------------------------------------------------------------------------
-@app.get("/api/health", response_model=HealthResponse, tags=["System"])
+# --------------------------------------------------
+
+@app.get(
+    "/api/health",
+    response_model=HealthResponse,
+    tags=["System"],
+)
 def check_health(db: Session = Depends(get_db)):
-    """
-    Check the health of the FastAPI service and verify PostgreSQL / Supabase database connectivity.
-    """
+
     db_connected = False
+
     try:
-        from sqlalchemy import text
         db.execute(text("SELECT 1"))
         db_connected = True
+
     except Exception as e:
-        logger.warning("Database connectivity check failed: %s", str(e))
-        db_connected = False
+        logger.warning(
+            "Database connectivity check failed: %s",
+            str(e),
+        )
 
     return HealthResponse(
-        status="healthy",
+        status="healthy" if db_connected else "unhealthy",
         service=settings.PROJECT_NAME,
         database_connected=db_connected,
         database_engine=ACTIVE_ENGINE_TYPE,
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
 
-# -----------------------------------------------------------------------------
+
+# --------------------------------------------------
 # CONTACT FORM API
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+
 @app.post(
     "/api/contact",
     response_model=ContactSubmissionResult,
     status_code=status.HTTP_201_CREATED,
-    tags=["Contact"]
+    tags=["Contact"],
 )
-def create_contact_message(payload: ContactCreate, db: Session = Depends(get_db)):
-    """
-    Receive contact message submission from frontend portfolio,
-    validate payload via Pydantic, and persist into PostgreSQL (Supabase) via SQLAlchemy.
-    """
-    # 1. Anti-spam honeypot detection
+def create_contact_message(
+    payload: ContactCreate,
+    db: Session = Depends(get_db),
+):
+
+    # Honeypot spam protection
     if payload.website:
-        logger.warning("Honeypot triggered by suspected bot. Discarding submission.")
+
+        logger.warning(
+            "Honeypot triggered. Submission discarded."
+        )
+
         return ContactSubmissionResult(
             success=True,
             message="Your message has been saved successfully!",
             contact_id=None,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
         )
 
-    # 2. Persist to PostgreSQL database
+    # Save contact message
     try:
+
         new_message = ContactMessage(
             name=payload.name.strip(),
             email=payload.email.strip().lower(),
-            phone=payload.phone.strip() if payload.phone else None,
-            subject=payload.subject.strip() if payload.subject else None,
+
+            phone=(
+                payload.phone.strip()
+                if payload.phone
+                else None
+            ),
+
+            subject=(
+                payload.subject.strip()
+                if payload.subject
+                else None
+            ),
+
             message=payload.message.strip(),
-            status="unread"
+
+            status="unread",
         )
+
         db.add(new_message)
+
         db.commit()
+
         db.refresh(new_message)
 
         logger.info(
-            "Contact message stored: ID #%s from %s <%s>",
+            "Contact message saved. ID: %s",
             new_message.id,
-            new_message.name,
-            new_message.email
         )
 
         return ContactSubmissionResult(
             success=True,
             message="Your message has been saved successfully!",
             contact_id=new_message.id,
-            timestamp=new_message.created_at
+            timestamp=new_message.created_at,
         )
+
     except Exception as e:
+
         db.rollback()
-        logger.error("Database error while storing contact message: %s", str(e))
+
+        logger.exception(
+            "Failed to save contact message: %s",
+            str(e),
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save message to database. Please try again or reach out directly."
+            detail="Failed to save message. Please try again.",
         )
 
-# -----------------------------------------------------------------------------
-# PROJECTS API
-# -----------------------------------------------------------------------------
+
+# --------------------------------------------------
+# FEATURED PROJECTS
+# --------------------------------------------------
+
 FEATURED_PROJECTS = [
+
     {
         "id": "farmedge",
+
         "title": "FarmEdge",
+
         "subtitle": "Modern Agriculture Portal",
+
         "category": "Agricultural Information & Climate Platform",
+
         "live_url": "https://modernfarmingfarmedge.netlify.app/",
+
         "github_url": "https://github.com/kanveshraut1021-collab",
-        "description": "A web project focused on modern farming, agricultural information, climate suitability, and farming-related buying and selling. Empowering farmers with smart technology for sustainable growth.",
-        "objective": "Empower farmers and agriculture enthusiasts with practical guidance on modern cultivation techniques (drip irrigation, hydroponics), climate guides, and an accessible store interface.",
+
+        "description": (
+            "A web project focused on modern farming, "
+            "agricultural information, climate suitability, "
+            "and farming-related buying and selling."
+        ),
+
+        "objective": (
+            "Empower farmers and agriculture enthusiasts "
+            "with practical guidance on modern cultivation "
+            "techniques, climate guides, and an accessible store."
+        ),
+
         "features": [
-            "Modern agricultural technique guides with efficiency and water conservation metrics",
-            "Climate & crop suitability recommendations tailored to regional farming needs",
-            "AgroSmart agricultural supply catalog with interactive cart calculation",
-            "Clean, responsive multi-section layout accessible on mobile devices in rural areas"
+            "Modern agricultural technique guides",
+            "Climate and crop suitability information",
+            "Agricultural supply catalog",
+            "Responsive multi-section layout",
         ],
-        "tech_stack": ["HTML5", "CSS3", "JavaScript", "Netlify"],
-        "screenshot": "/screenshots/farmedge.png"
+
+        "tech_stack": [
+            "HTML5",
+            "CSS3",
+            "JavaScript",
+            "Netlify",
+        ],
+
+        "screenshot": "/screenshots/farmedge.png",
     },
+
     {
         "id": "sai-automobile",
+
         "title": "Sai Automobile",
+
         "subtitle": "Commercial Workshop & Service Platform",
+
         "category": "Commercial Client Project",
+
         "live_url": "https://sai-automobile.vercel.app/",
+
         "github_url": "https://github.com/kanveshraut1021-collab",
-        "description": "A real-world commercial website built for an automotive business providing battery replacement, oil change, and vehicle wash bay services with interactive shutter doors and quick-call booking.",
-        "objective": "Build a high-conversion, professional web presence for a local automobile service business with clear pricing, battery brand showcases, real-time workshop details, and direct call functionality.",
+
+        "description": (
+            "A commercial website built for an automotive "
+            "business providing battery replacement, oil "
+            "change, and vehicle wash services."
+        ),
+
+        "objective": (
+            "Build a professional web presence for an "
+            "automobile service business with service "
+            "information and direct customer contact."
+        ),
+
         "features": [
-            "Interactive service bay inspection cards with shutter door roll-up animations",
-            "Curated genuine battery brand catalog (Exide, Amaron, Tata Green)",
-            "Direct emergency calling integration (tel:+919075919023) for on-road assistance",
-            "Operational hours, live open indicator, and service location navigation"
+            "Interactive service cards",
+            "Automobile battery brand showcase",
+            "Direct calling integration",
+            "Workshop information and location navigation",
         ],
-        "tech_stack": ["HTML5", "CSS3", "JavaScript", "Vercel"],
-        "screenshot": "/screenshots/sai-automobile.png"
+
+        "tech_stack": [
+            "HTML5",
+            "CSS3",
+            "JavaScript",
+            "Vercel",
+        ],
+
+        "screenshot": "/screenshots/sai-automobile.png",
     },
+
     {
         "id": "inventory-system",
+
         "title": "Inventory Management System",
+
         "subtitle": "StockHub Dark Dashboard Application",
+
         "category": "Full-Stack Dashboard Application",
-        "live_url": "https://inventory-management-system-iota-sandy.vercel.app/",
+
+        "live_url": (
+            "https://inventory-management-system-iota-sandy.vercel.app/"
+        ),
+
         "github_url": "https://github.com/kanveshraut1021-collab",
-        "description": "A high-performance dark inventory management dashboard for tracking warehouse stock, monitoring replenishment thresholds, and managing SKU health with real-time analytics.",
-        "objective": "Engineered an enterprise-grade dark inventory control system with real-time stock status, search filtration, and low-stock replenishment alert metrics.",
+
+        "description": (
+            "A dark inventory management dashboard "
+            "for tracking warehouse stock, monitoring "
+            "replenishment thresholds, and managing products."
+        ),
+
+        "objective": (
+            "Build an inventory control system with "
+            "stock status, search, and low-stock alerts."
+        ),
+
         "features": [
-            "Real-time stock level analytics, SKU classification, and category breakdown",
-            "Product inventory data table with instant search and status indicators",
-            "Critical stock health alerts highlighting items requiring immediate restock",
-            "Dark theme UI designed for extended viewing with JetBrains Mono data typography"
+            "Stock level analytics",
+            "Product inventory table",
+            "Search and filtering",
+            "Low-stock alerts",
+            "Dark dashboard interface",
         ],
-        "tech_stack": ["React.js", "Python Flask / REST API", "Tailwind CSS", "Vercel"],
-        "screenshot": "/screenshots/inventory.png"
-    }
+
+        "tech_stack": [
+            "React.js",
+            "Python Flask",
+            "REST API",
+            "Tailwind CSS",
+            "Vercel",
+        ],
+
+        "screenshot": "/screenshots/inventory.png",
+    },
+
 ]
 
-@app.get("/api/projects", response_model=List[ProjectInfo], tags=["Projects"])
+
+# --------------------------------------------------
+# PROJECTS API
+# --------------------------------------------------
+
+@app.get(
+    "/api/projects",
+    response_model=List[ProjectInfo],
+    tags=["Projects"],
+)
 def get_projects():
-    """
-    Return list of live featured projects with full metadata, descriptions, and verified links.
-    """
+
     return FEATURED_PROJECTS
 
+
+# --------------------------------------------------
+# RUN APPLICATION
+# --------------------------------------------------
+
 if __name__ == "__main__":
+
     import uvicorn
-    uvicorn.run("backend.main:app", host=settings.HOST, port=settings.PORT, reload=settings.DEBUG)
+
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=settings.PORT,
+        reload=settings.DEBUG,
+    )
